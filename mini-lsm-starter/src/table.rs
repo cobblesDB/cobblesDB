@@ -8,8 +8,11 @@ mod iterator;
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
+use bytes::BufMut;
+use crc32fast::Hasher as Crc32Hasher;
+use anyhow::{Result, anyhow, bail};//change anyhow::Result to anyhow::{Result, anyhow, bail}
 
-use anyhow::Result;
+
 pub use builder::SsTableBuilder;
 use bytes::Buf;
 pub use iterator::SsTableIterator;
@@ -17,6 +20,7 @@ pub use iterator::SsTableIterator;
 use crate::block::Block;
 use crate::key::{KeyBytes, KeySlice};
 use crate::lsm_storage::BlockCache;
+
 
 use self::bloom::Bloom;
 
@@ -39,12 +43,93 @@ impl BlockMeta {
         #[allow(clippy::ptr_arg)] // remove this allow after you finish
         buf: &mut Vec<u8>,
     ) {
-        unimplemented!()
+        pub fn encode_block_meta(block_meta: &[BlockMeta], buf: &mut Vec<u8>) {
+            // Estimate the required space
+            let estimated_size = calculate_estimated_size(block_meta);
+            buf.reserve(estimated_size);
+        
+            // Save the original length of the buffer
+            let original_len = buf.len();
+            
+            // Store the number of block meta entries
+            buf.put_u32(block_meta.len() as u32);
+            
+            // Encode each block meta entry
+            for meta in block_meta {
+                buf.put_u32(meta.offset as u32);
+                buf.put_u16(meta.first_key.len() as u16);
+                buf.put_slice(meta.first_key.raw_ref());
+                buf.put_u16(meta.last_key.len() as u16);
+                buf.put_slice(meta.last_key.raw_ref());
+
+            }
+            
+            // Compute and append the CRC32 checksum
+            let crc32_checksum = calculate_crc32(&buf[original_len + 4..]);
+            buf.put_u32(crc32_checksum);
+            
+            // Verify that the estimated size matches the actual encoded size
+            assert_eq!(estimated_size, buf.len() - original_len);
+        }
+        
+        // Function to calculate the estimated size
+        fn calculate_estimated_size(block_meta: &[BlockMeta]) -> usize {
+            let mut size = std::mem::size_of::<u32>();
+            for meta in block_meta {
+                size += std::mem::size_of::<u32>(); // Offset
+                size += std::mem::size_of::<u16>() + meta.first_key.len(); // First key length and data
+                size += std::mem::size_of::<u16>() + meta.last_key.len(); // Last key length and data
+            }
+            size + std::mem::size_of::<u32>() // Checksum
+        }
+        
+        // Function to calculate the CRC32 checksum
+        fn calculate_crc32(data: &[u8]) -> u32 {
+            let mut hasher = Crc32Hasher::new();
+            hasher.update(data);
+            hasher.finalize()
+        }
     }
 
     /// Decode block meta from a buffer.
-    pub fn decode_block_meta(buf: impl Buf) -> Vec<BlockMeta> {
-        unimplemented!()
+    pub fn decode_block_meta(mut buf: &[u8]) -> Result<Vec<BlockMeta>> {
+        let mut block_meta = Vec::new();
+    
+        // Read number of block meta entries
+        let num_entries = buf.get_u32() as usize;
+        
+        // Calculate expected CRC32 checksum
+        let expected_checksum = {
+            let mut hasher = Crc32Hasher::new();
+            hasher.update(&buf[..buf.len() - 4]); // Exclude last 4 bytes (checksum itself)
+            hasher.finalize()
+        };
+    
+        // Read and verify each block meta entry
+        for _ in 0..num_entries {
+            let offset = buf.get_u32() as usize;
+            let first_key_len = buf.get_u16() as usize;
+            let first_key = KeyBytes::from_bytes(buf.copy_to_bytes(first_key_len));
+            buf.advance(first_key_len);
+            
+            let last_key_len = buf.get_u16() as usize;
+            let last_key = KeyBytes::from_bytes(buf.copy_to_bytes(last_key_len));
+            buf.advance(last_key_len);
+            
+            block_meta.push(BlockMeta {
+                offset,
+                first_key,
+                last_key,
+            });
+        }
+    
+        // Read and verify CRC32 checksum
+        let actual_checksum = buf.get_u32();
+        if actual_checksum != expected_checksum {
+            bail!("meta checksum mismatched");
+        }
+    
+        Ok(block_meta)
     }
 }
 
@@ -108,9 +193,36 @@ impl SsTable {
 
     /// Open SSTable from a file.
     pub fn open(id: usize, block_cache: Option<Arc<BlockCache>>, file: FileObject) -> Result<Self> {
-        unimplemented!()
+        let len = file.size();
+        
+        let raw_bloom_offset = file.read(len - 4, 4)?;
+        let bloom_offset = (&raw_bloom_offset[..]).get_u32() as u64;
+        
+        let raw_bloom = file.read(bloom_offset, len - 4 - bloom_offset)?;
+        let bloom_filter = Bloom::decode(&raw_bloom)?;
+        
+        let raw_meta_offset = file.read(bloom_offset - 4, 4)?;
+        let block_meta_offset = (&raw_meta_offset[..]).get_u32() as u64;
+        
+        let raw_meta = file.read(block_meta_offset, bloom_offset - 4 - block_meta_offset)?;
+        let block_meta = BlockMeta::decode_block_meta(&raw_meta[..])?;
+        
+        let first_key = block_meta.first().ok_or_else(|| anyhow!("No block meta found"))?.first_key.clone();
+        let last_key = block_meta.last().ok_or_else(|| anyhow!("No block meta found"))?.last_key.clone();
+        
+        Ok(Self {
+            file,
+            first_key,
+            last_key,
+            block_meta,
+            block_meta_offset: block_meta_offset as usize,
+            id,
+            block_cache,
+            bloom: Some(bloom_filter),
+            max_ts: 0,
+        })
     }
-
+    
     /// Create a mock SST with only first key + last key metadata
     pub fn create_meta_only(
         id: usize,
@@ -133,20 +245,55 @@ impl SsTable {
 
     /// Read a block from the disk.
     pub fn read_block(&self, block_idx: usize) -> Result<Arc<Block>> {
-        unimplemented!()
+        let offset = self.block_meta.get(block_idx)
+            .ok_or_else(|| anyhow!("Block index out of bounds"))?.offset;
+        let offset_end = self.block_meta.get(block_idx + 1)
+            .map_or(self.block_meta_offset, |meta| meta.offset);
+        
+        let block_len = offset_end - offset - 4;
+        let block_data_with_checksum = self.file.read(offset as u64, (offset_end - offset) as u64)?;
+        
+        let block_data = &block_data_with_checksum[..block_len];
+        let checksum = (&block_data_with_checksum[block_len..]).get_u32();
+        
+        if checksum != crc32fast::hash(block_data) {
+            bail!("block checksum mismatched");
+        }
+        
+        Ok(Arc::new(Block::decode(block_data)))
     }
+    
 
     /// Read a block from disk, with block cache. (Day 4)
     pub fn read_block_cached(&self, block_idx: usize) -> Result<Arc<Block>> {
-        unimplemented!()
+        if let Some(ref block_cache) = self.block_cache {
+            block_cache.try_get_with((self.id, block_idx), || self.read_block(block_idx))
+                .map_err(|e| anyhow::anyhow!(e))
+        } else {
+            self.read_block(block_idx)
+        }
     }
+    
 
     /// Find the block that may contain `key`.
     /// Note: You may want to make use of the `first_key` stored in `BlockMeta`.
     /// You may also assume the key-value pairs stored in each consecutive block are sorted.
     pub fn find_block_idx(&self, key: KeySlice) -> usize {
-        unimplemented!()
+        let mut low = 0;
+        let mut high = self.block_meta.len();
+        
+        while low < high {
+            let mid = (low + high) / 2;
+            if self.block_meta[mid].first_key.as_key_slice() <= key {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        
+        low.saturating_sub(1)
     }
+    
 
     /// Get number of data blocks.
     pub fn num_of_blocks(&self) -> usize {
