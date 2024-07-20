@@ -62,4 +62,8 @@ impl StorageIterator for SsTableIterator {
     fn next(&mut self) -> Result<()> {
         unimplemented!()
     }
+
+    fn num_active_iterators(&self) -> usize {
+        1
+    }
 }

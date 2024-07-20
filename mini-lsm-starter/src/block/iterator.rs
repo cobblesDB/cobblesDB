@@ -124,7 +124,7 @@ impl BlockIterator {
     /// callers.
     pub fn seek_to_key(&mut self, key: KeySlice) {
         self.is_valid = true;
-        
+
         if self.key == key.to_key_vec() {
             return;
         }
@@ -139,10 +139,10 @@ impl BlockIterator {
             return;
         }
 
-        match key.cmp(&self.key.as_key_slice()){
-            Ordering::Equal=>return,
-            Ordering::Less=> self.seek_to_first(),
-            Ordering::Greater=>{
+        match key.cmp(&self.key.as_key_slice()) {
+            Ordering::Equal => return,
+            Ordering::Less => self.seek_to_first(),
+            Ordering::Greater => {
                 while self.is_valid() && key.cmp(&self.key.as_key_slice()) == Ordering::Greater {
                     self.next();
                 }
