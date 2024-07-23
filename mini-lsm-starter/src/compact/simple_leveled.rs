@@ -1,13 +1,13 @@
 use serde::{Deserialize, Serialize};
 
-use crate::lsm_storage::LsmStorageState;
-use crate::table::{SsTableIterator, SsTableBuilder,SsTable};
+use crate::compact::Path;
 use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::StorageIterator;
+use crate::lsm_storage::BlockCache;
+use crate::lsm_storage::LsmStorageState;
+use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
 use std::path;
 use std::sync::Arc;
-use crate::lsm_storage::BlockCache;
-use crate::compact::Path;
 
 #[derive(Debug, Clone)]
 pub struct SimpleLeveledCompactionOptions {
@@ -48,7 +48,7 @@ impl SimpleLeveledCompactionController {
             let upper_level_size = snapshot.l0_sstables.len();
             let lower_level_size = snapshot.levels[0].1.len();
             if upper_level_size != 0 {
-                let cur_size_ratio_percent = (lower_level_size/upper_level_size)*100;
+                let cur_size_ratio_percent = (lower_level_size / upper_level_size) * 100;
                 if cur_size_ratio_percent == self.options.size_ratio_percent {
                     return None;
                 }
@@ -62,21 +62,21 @@ impl SimpleLeveledCompactionController {
                 is_lower_level_bottom_level: self.options.max_levels == 1,
             };
             return Some(task);
-        } 
-        for level in 0..snapshot.levels.len()-1 {
+        }
+        for level in 0..snapshot.levels.len() - 1 {
             let upper_level_size = snapshot.levels[level].1.len();
-            let lower_level_size = snapshot.levels[level+1].1.len();
+            let lower_level_size = snapshot.levels[level + 1].1.len();
             if upper_level_size == 0 {
                 continue;
             }
-            let cur_size_ratio_percent = (lower_level_size/upper_level_size)*100;
+            let cur_size_ratio_percent = (lower_level_size / upper_level_size) * 100;
             if cur_size_ratio_percent < self.options.size_ratio_percent {
                 let task = SimpleLeveledCompactionTask {
-                    upper_level: Some(level+1),
+                    upper_level: Some(level + 1),
                     upper_level_sst_ids: snapshot.levels[level].1.clone(),
-                    lower_level: level+2,
-                    lower_level_sst_ids: snapshot.levels[level+1].1.clone(),
-                    is_lower_level_bottom_level: self.options.max_levels == level+1,
+                    lower_level: level + 2,
+                    lower_level_sst_ids: snapshot.levels[level + 1].1.clone(),
+                    is_lower_level_bottom_level: self.options.max_levels == level + 1,
                 };
                 return Some(task);
             }
@@ -96,33 +96,28 @@ impl SimpleLeveledCompactionController {
         snapshot: &LsmStorageState,
         task: &SimpleLeveledCompactionTask,
         output: &[usize],
-    ) -> (LsmStorageState, Vec<usize> ) {
-
-        // the max sst id is always the last element in the upper level
-        let mut next_sst_id = task.upper_level_sst_ids.last().unwrap()+1;
+    ) -> (LsmStorageState, Vec<usize>) {
         let mut state = snapshot.clone();
-        let mut output = vec![];
+        let mut del = vec![];
 
-        // 1.move sst id form upper&lower level to output
+        // 1.move sst id form upper&lower level to del
         if task.upper_level.is_none() {
-            output.append(&mut state.l0_sstables);
+            del.append(&mut state.l0_sstables);
         } else {
             // upper_level means real level number, so we need to -1
-            output.append(&mut state.levels[task.upper_level.unwrap()-1].1);
+            del.append(&mut state.levels[task.upper_level.unwrap() - 1].1);
         }
 
         let l0_size = state.l0_sstables.len();
 
         // lower_level means real level number, so we need to -1
-        output.append(&mut state.levels[task.lower_level-1].1);
-        // 2. add new sst id to lower level
-        for i in 0..output.len() {
-            // lower_level means real level number, so we need to -1
-            state.levels[task.lower_level-1].1.push(next_sst_id);
-            next_sst_id += 1;
-        }
+        del.append(&mut state.levels[task.lower_level - 1].1);
+
+        // // 2. add new sst id to lower level
+        state.levels[task.lower_level - 1].1 = output.to_vec();
+
         // deal with L0 SST gets flushed while the compactor generates new SSTs
         assert!(l0_size == state.l0_sstables.len());
-        (state, output)
+        (state, del)
     }
 }
