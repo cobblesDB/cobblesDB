@@ -108,7 +108,7 @@ fn test_sst_iterator() {
 }
 
 #[test]
-fn test_sst_seek_key() {
+fn test_sst_seek_key() { 
     let (_dir, sst) = generate_sst();
     let sst = Arc::new(sst);
     let mut iter = SsTableIterator::create_and_seek_to_key(sst, key_of(0).as_key_slice()).unwrap();
