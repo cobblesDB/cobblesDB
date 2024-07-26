@@ -1,6 +1,6 @@
 use std::{cmp::Ordering, sync::Arc};
 
-use crate::key::{Key, KeySlice, KeyVec};
+use crate::key::{KeySlice, KeyVec};
 
 use super::Block;
 use std::ops::Range;

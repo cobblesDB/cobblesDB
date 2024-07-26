@@ -11,7 +11,7 @@ use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
 fn test_sst_build_single_key() {
     let mut builder = SsTableBuilder::new(16);
     builder.add(KeySlice::for_testing_from_slice_no_ts(b"233"), b"233333");
-    let dir = tempdir().unwrap();
+    let dir: TempDir = tempdir().unwrap();
     builder.build_for_test(dir.path().join("1.sst")).unwrap();
 }
 
@@ -108,7 +108,7 @@ fn test_sst_iterator() {
 }
 
 #[test]
-fn test_sst_seek_key() {
+fn test_sst_seek_key() { 
     let (_dir, sst) = generate_sst();
     let sst = Arc::new(sst);
     let mut iter = SsTableIterator::create_and_seek_to_key(sst, key_of(0).as_key_slice()).unwrap();
